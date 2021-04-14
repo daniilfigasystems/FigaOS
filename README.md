@@ -1,2 +1,4 @@
 # FigaOS
-Figa Systems OS for opencomputers edition
+FigaOS Is INNOVATION SYSTEM
+this system in alpha and can have issues
+please dont hate my figaOS
