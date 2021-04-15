@@ -57,7 +57,7 @@ do
     end
   end
   if not init then
-    error("no bootable medium found" .. (reason and (": " .. tostring(reason)) or ""), 0)
+    error("no bootable medium found Insert Boot Media Or select Correct Boot Device" .. (reason and (": " .. tostring(reason)) or ""), 0)
 	computer.beep(1000, 0.2)
 	computer.beep(1000, 0.2)
 	computer.beep(1000, 0.2)
