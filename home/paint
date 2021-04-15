@@ -1,0 +1,280 @@
+--- Можн улучшить:
+-- [кря] Сейчас при установке проектора он поворачивается всегда на сервер, но можно этого не делать, заменив алагаритм нахождения пикселей при нажатии мечём заменив оси, учтённые при установке
+
+-- TODO 
+-- Разобраться с зоной вокруг проектора
+
+local component, fs, serializ, event = require("component"), require("filesystem"), require("serialization"), require("event")
+
+local args = require("shell").parse(...)
+local user = ({event.pull()})[5] -- Ник того, кто запустил эту программу
+
+local nameSaveCFG, FileCfg , cfg = "/home/HoloSave.cfg", "/home/HoloEditor.cfg"
+cfg = fs.exists(nameSaveCFG) and serializ.unserialize(io.open(nameSaveCFG):read()) or {}
+
+local sensor = component.openperipheral_sensor
+
+function hologramAdd()
+	print("Первичная колибровка, установите проектор")
+	repeat until ({event.pull("component_added")})[3] == "hologram" -- TODO при файле конфига не запускает
+	result = component.hologram
+
+	result.setRotation(math.floor(sensor.getPlayerByName(user).all().living.yawHead/90+0.5)*90-180,0,1,0)
+	--result.setTranslation(0,5,0)
+	return result
+end
+
+local hologram = component.isAvailable("hologram") and component.hologram or hologramAdd()
+
+local set = hologram.set
+
+-- цвет, режим линии, шаг для кнопки "шаг назад", сам буфер, буфер кнопок, undo , относительные координаты Hologram к Sensor, переменная отвечающая за отображение всех кнопок
+local color, line, un, buf, buttons, undoBuf, w, fl = 2, 0, 0, {}, {}, {}, {}, {}
+
+local function add(mas,x,y,z,f) 
+	mas[x] = mas[x] or {} 
+	mas[x][y] = mas[x][y] or {} 
+	mas[x][y][z] = f
+end
+
+local function read(x,y,z) return buf[x] and buf[x][y] and buf[x][y][z] end -- Считывание буфера
+
+local xxx,yyy,zzz,ccol
+local function hologramSet(xx,yy,zz,col) -- Ставим пиксель
+	if line ~= 0 and xxx == xx and yyy == yy and zzz == zz and ccol == ccol then return end
+
+	add(buf,xx,yy,zz, col ~= 0 and col or nil )
+	set(xx,yy,zz,col or 0)
+	xxx,yyy,zzz,ccol = xx,yy,zz,col
+end
+
+local xS, yS, zS
+
+local Scale = hologram.getScale()
+local sizeRadiusHologram, stepFromHologram = Scale*1.5 , 2
+local zone = sizeRadiusHologram + stepFromHologram
+
+local function search(name) -- Возвращает данные о расположении игрока относительно координатной плоскости проектора, а так же направление взгляда
+	local player
+	pcall(function() player = sensor.getPlayerByName(name) end) -- Бывает выдаёт ошибки, поэтому засунул в pcall (name or "" не помогает)
+	if player then
+		player = player.all()
+		local p = player.position
+		p.x, p.y, p.z = p.x - w.x , p.y - w.y, p.z - w.z
+		if (p.x > -zone) and (p.x < zone) and (p.z > -zone) and (p.z < zone) and (p.y > -Scale) and (p.y < zone*2) then
+
+			local sneaking = player.living.isSneaking
+
+			local growth = sneaking and 1.54 or 1.62 -- player growth
+			p.x, p.y, p.z = (p.x + sizeRadiusHologram)/Scale, (p.y-Scale*2+growth-0.003)/Scale, (p.z + sizeRadiusHologram)/Scale -- Смещение к начальным координатам галограммы
+			if player.player.isBlocking then
+				local xH, yH, zH = p.x*16+1,(p.y)*16+1,p.z*16+1 -- Entry points on the hologram
+
+				local yawHead, pitch = math.rad( player.living.yawHead ) , math.rad( player.living.pitch )
+				local dx, dy, dz = -math.sin( yawHead )/48 , -math.tan( pitch )/48 , math.cos( yawHead )/48
+
+				dy = dy > 1 and 1 or dy < -1 and -1 or dy -- Решение проблемы с появлением интвервала между пикселей при рисовании линий под 90 градусов относительно горизонта (голову резко вверх или виз)
+				if dy == 1 or dy == -1 then dx, dz = 0,0 end
+
+				return xH, yH, zH, dx, dy, dz, sneaking
+			end
+		end
+	end
+end
+
+local function main(name)
+
+	local xH, yH, zH, dx, dy, dz, sneaking = search(name)
+	if not xH then return end
+
+	local xS, yS, zS = xH, yH, zH
+	local flag,undoMiniBuf,xL,yL,zL,x,y,z = true,{}
+				
+	repeat 
+		xH, yH, zH = xH + dx, yH + dy, zH + dz
+		x,y,z = math.floor(xH) , math.floor(yH) , math.floor(zH)
+		
+		if (fl ~= 0 and buttons[x] and buttons[x][y] and buttons[x][y][z]) or (x == 1 and y == 32 and z == 1) then -- Buttons или столкновение
+			buttons[x][y][z]() 
+			flag = false 
+			break
+		end
+
+		if read(x,y,z) and (x < 48 and y < 48 and z < 48 and x > 1 and y > 1 and z > 1 ) then -- Pixel
+			if sneaking then -- Нажал Shift?
+				if line == 0 then -- Выключена отрисовка линий?
+					xxx = 0 -- <>
+					x,y,z = math.floor(xH-dx),math.floor(yH-dy),math.floor(zH-dz)
+					hologramSet(x,y,z,color)  -- Set Pixel
+					table.insert(undoMiniBuf,{color,x,y,z, true})
+					break
+				else
+					xL,yL,zL = x,y,z
+					break
+				end
+			else
+				xxx = 0 -- <>
+				table.insert(undoMiniBuf,{read(x,y,z),x,y,z, false})
+				hologramSet(x,y,z,0) -- Delete Pixel
+				flag = false
+				break
+			end
+		end
+	until x > 80 or y > 64 or z > 80 or x < -32 or y < -16 or z < -32
+	
+	if flag and line ~= 0 and sneaking then
+		xH, yH, zH = xS, yS, zS
+		x,y,z = 0,0,0
+		repeat
+		-- while not((x > 48 or y > 48 or z > 48 or x < 1 or y < 1 or z < 1) or (x == xL and y == yL and z == zL)) do
+		--while (x < 48 or y < 48 or z < 48 or x > 1 or y > 1 or z > 1) and (x ~= xL and y ~= yL and z ~= zL) do
+			xH, yH, zH = xH + dx, yH + dy, zH + dz
+			x,y,z = math.floor(xH) , math.floor(yH) , math.floor(zH)
+			hologramSet(x,y,z,line)
+			table.insert(undoMiniBuf,{color,x,y,z, true})
+		--end
+		until (x > 48 or y > 48 or z > 48 or x < 1 or y < 1 or z < 1) or (x == xL and y == yL and z == zL)
+	end
+
+	if #undoMiniBuf > 0 then
+		un = un + 1 > 40 and 1 or un + 1
+		undoBuf[un] = undoMiniBuf
+
+		local saveCFG = fs.exists(nameSaveCFG) and serializ.unserialize(io.open(nameSaveCFG):read()) or {}
+		for _,v in pairs(undoMiniBuf) do -- Сохранение рисунка
+			add(saveCFG,v[2],v[3],v[4],v[5] and v[1] or nil )
+		end
+		io.open(nameSaveCFG,"w"):write(serializ.serialize(saveCFG)):close()
+	end
+end
+
+local function editScale(inc)
+	if Scale+inc<1 and Scale+inc>4 then inc = 0 end
+	Scale = Scale+inc/10
+	hologram.setScale(Scale)
+	sizeRadiusHologram, stepFromHologram = Scale*1.5 , 2
+    zone = sizeRadiusHologram + stepFromHologram
+end
+
+local function start() -- Первичная калибровка координат сенсора и голограммы
+	hologram.setScale(1)
+	hologram.setTranslation(0,0.5,0)
+	editScale(0)
+	w.n = 0
+	for _,_ in component.list("hologram") do w.n = w.n + 1 end
+	if w.n == 1 then 
+		print("Встав на голографический проектор, нажмите Enter") 
+	else -- да я да я да
+		if w.n == 4 or w.n == 8 then 
+			print("Встав между голографическими проекторами, нажмите Enter") 
+		else
+			print("Найдено иное количество проекторов, отличающиеся от 1/4/8 шт ")
+		end
+	end
+	local ev
+	repeat ev = {event.pull("key_down")} until ev[3] == 13
+	local playerPoz = sensor.getPlayerByName(ev[5]).all().position
+	w.x, w.y, w.z = playerPoz.x, playerPoz.y, playerPoz.z
+	if w.n == 1 or w.n == 8 then w.x, w.y, w.z = math.floor(w.x)+0.5, math.floor(w.y)-0.5, math.floor(w.z)+0.5 end
+	if w.n == 4 then w.x, w.y, w.z = math.floor(w.x+0.5), math.floor(w.y+0.5), math.floor(w.z+0.5) end
+	io.open(FileCfg,"w"):write(serializ.serialize(w)):close()
+	print("При изменении положения сенсора или голограммы, либо запустите программу с параметром reset либо удалите файл HoloEditor.cfg , тогда колибровка запустится вновь")
+end
+
+local function setButtons(col) -- Выводим кнопки на экран
+	for x,v1 in pairs(buttons) do
+		for y,v2 in pairs(v1) do
+			for z,_ in pairs(v2) do
+				set(x,y,z,col)
+			end
+		end
+	end
+	for i=2,3 do set(i,5,1,line) end -- анимированная кнопка линии
+end
+
+local function clearHologram()
+	hologram.clear()
+	for z = 23,25 do 
+		for x = 23,25 do
+			hologramSet(x,16,z,z-22)
+		end
+	end
+	setButtons(color)
+	if fs.exists(nameSaveCFG) then io.open(nameSaveCFG,"w"):write("{}"):close() end -- Стираем буфер сохранения
+end
+
+local function LineFun() -- Изменения состояния кисти "Линия" и анимация кнопки
+	line = line==color and 0 or color 
+	for i=2,3 do set(i,5,1,line) end
+end --<>
+
+local function undo() -- Шаг назад
+	if undoBuf[un] ~= nil then
+		local saveCFG = fs.exists(nameSaveCFG) and serializ.unserialize(io.open(nameSaveCFG):read()) or {}
+
+		for _,v in pairs( undoBuf[un] ) do
+			hologramSet(v[2],v[3],v[4],v[5] and 0 or v[1])
+			add(saveCFG,v[2],v[3],v[4],v[5] and 0 or v[1])
+		end
+		undoBuf[un] = nil
+		un = un-1 < 1 and 40 or un-1
+
+		io.open(nameSaveCFG,"w"):write(serializ.serialize(saveCFG)):close()
+	end
+end
+
+buttons = {
+	{ { { 1,1,1 } } , function() color = color+1 > 3 and 1 or color+1 line = line == 0 and 0 or color set(1,1,1,color) setButtons(color) end}, -- Set color
+	{ { { 1,3,1 } } , function() set(1,3,1,color) hologramSet(math.floor(xS), math.floor(yS), math.floor(zS),color) end}, -- Set pixel to player
+	{ { { 1,5,1 } } , function() LineFun() set(1,5,1,color) end}, -- Line activation
+	{ { { 2,5,1 }, { 3,5,1 } } , function() LineFun() end},
+	{ { { 1,7,1 }, { 1,8,1 } } , function() undo() end},
+	{ { { 2,10,2 }, { 2,12,2 }, { 1,11,3 }, { 3,11,1 } } , function() editScale(1) end},
+	{ { { 2,14,2 }, { 1,14,3 }, { 3,14,1 } } , function() editScale(-1) end},
+	{ { { 1,30,1 } } , function() buf = {} clearHologram() end},
+	{ { { 1,32,1 } } , function() fl = fl==0 and color or 0 setButtons(fl) set(1,32,1,fl) end}
+}
+
+local bibi = {}
+for _,v in pairs(buttons) do -- Хитрожопная система, по превращению массива кнопок в удобный массив для использования
+	for _,coords in pairs(v[1]) do
+		add(bibi,coords[1],coords[2],coords[3],v[2])
+	end
+end
+buttons = bibi
+bibi = nil
+
+if fs.exists(FileCfg) then -- Файл настроек относительных координат проектора
+	w = serializ.unserialize(io.open(FileCfg):read())
+	if w.n == nil then print("Файл HoloEditor.cfg повреждён. Перезапустите программу") fs.remove(FileCfg) os.exit() end
+else
+	start()
+end
+
+if cfg ~= nil and type(cfg) == "table" then
+	hologram.clear()
+
+	for x,v1 in pairs(cfg) do -- Рисуем сохранённый рисунок из файла
+		for y,v2 in pairs(v1) do
+			for z,col in pairs(v2) do
+				hologramSet(x,y,z,col)
+			end
+		end
+	end
+
+	setButtons(color)
+else
+	clearHologram() 
+end
+
+while true do
+	if args[1] == "reset" then start() end
+	if args[1] and tonumber(args[1]) == nil then -- Если при запуске проги был указан ник, тогда не будет поиска
+		main(args[1])
+	else
+		for _,v in pairs( sensor.getPlayers() ) do
+			main(v.name)
+		end
+	end
+	os.sleep(0.0001)
+end
